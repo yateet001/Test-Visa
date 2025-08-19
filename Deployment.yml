@@ -1,0 +1,98 @@
+trigger: none
+
+parameters:
+- name: Deployment_Environment 
+  displayName: "Deployment_Environment"
+  type: string
+  default: "DEV"
+  values:
+    - "DEV"
+    - "QA"
+
+
+- name: Environment_Type 
+  displayName: "Environment_Type"
+  type: string
+  default: "Primary"
+  values:
+    - "Primary"
+    - "Secondary"
+
+- name: Build_Pipeline_Build_Id
+  displayName: "Build Pipeline Build ID"
+  type: string
+  default: ""
+
+- name: Build_Pipeline_Build_Number
+  displayName: "Build Pipeline Build Number"
+  type: string
+  default: ""
+
+variables:
+  - template: /Deploy/Config/CONFIG_${{parameters.Deployment_Environment}}.yml
+
+stages:
+- stage: Approval_Stage_${{parameters.Deployment_Environment}}
+  jobs:
+  - deployment: Approval
+    environment: ${{parameters.Deployment_Environment}}-Deploy
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "Approve"
+
+- stage: DeployCodeToWorkspace
+  displayName: "Deployment Stage"
+  jobs:
+    - job: InvokePythonOrchestratorFunction
+      timeoutInMinutes: 360
+      displayName: "Invoke the Python orchestrator function for deployment"
+      pool:
+        vmImage: "ubuntu-latest"
+
+      steps:
+        - task: AzureKeyVault@2
+          displayName: "Azure Key Vault: ${{ variables.KeyVaultName }}"
+          inputs:
+            azureSubscription: ${{ variables.AdfAzureServiceConnection }}
+            KeyVaultName: ${{ variables.KeyVaultName }}
+            SecretsFilter: |
+                      ${{ variables.SpnSecretName }},
+
+        # Use a specific Python version
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: "3.x"
+            addToPath: true
+
+        # Install Python dependencies
+        - script: |
+            python -m pip install pandas requests azure-storage-file-datalake azure-identity pyyaml
+          displayName: "Install Python dependencies"
+
+        # Download artifacts from the previous build pipeline
+        - task: DownloadPipelineArtifact@2
+          displayName: "Download Artifacts from Previous Build"
+          inputs:
+            buildType: "specific"
+            project: "$(System.TeamProject)"
+            pipeline: ${{ variables.BuildPipelineName }}
+            runVersion: 'specific'
+            runId: ${{ parameters.Build_Pipeline_Build_Id }}
+            artifactName: ${{ variables.ArtifactName }}
+            targetPath: "$(Build.SourcesDirectory)/ELM"
+
+        
+        # Run the Python deployment orchestrator script
+        - script: |
+            python Deploy/Common/deployment_main.py
+          displayName: "Invoke orchestrator function"
+          env:
+            spn: $(spn) # Provide spn secret anme
+            deployment_env: ${{parameters.Deployment_Environment}}
+            environment_type: ${{parameters.Environment_Type}}
+            artifact_path: "$(Build.SourcesDirectory)/ELM"
+            build_number: ${{ parameters.Build_Pipeline_Build_Number }}
+            start_time : $(Build.StartTime)
+            connections: $(Connections)
